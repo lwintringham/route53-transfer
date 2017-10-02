@@ -1,6 +1,9 @@
+from __future__ import division
+from __future__ import print_function
 import csv, sys, time
 from datetime import datetime
 import itertools
+import logging
 from os import environ
 from os.path import join
 from boto import route53
@@ -153,15 +156,51 @@ def get_file(filename, mode):
         return open(filename, mode)
 
 
+def chunker(x, ct):
+    ls = list(x)
+    for i in range(0, len(ls), ct):
+        yield ls[i:i+ct]
+
+
+def post_changes(con,zone,commit_flag, oper, recs, chunk_size, **kwargs):
+    logging.info("Preparing to %s %d records" % (oper, len(recs)))
+    try:
+        changes = ResourceRecordSets(con, zone['id'])
+        for chunk in chunker(recs, chunk_size):
+            for rec in chunk:
+                change = changes.add_change(oper, **rec.to_change_dict())
+                for value in rec.resource_records:
+                    change.add_value(value)
+
+            if commit_flag:
+                logging.debug("Commiting %d %s records." % (len(chunk), oper))
+                changes.commit()
+        logging.info("Done")
+
+    except Exception as ex:
+        logging.info("post_changes for %s with %d records, commit=%s failed." % 
+                          (open, len(recs), commit_flag))
+
+
 def load(con, zone_name, file_in, **kwargs):
     ''' Send DNS records from input file to Route 53.
 
         Arguments are Route53 connection, zone name, vpc info, and file to open for reading.
     '''
+
+
+    ''' Set dry-run flag if specified on the command line.
+    '''
+    commit_flag = True
+    if kwargs.get('dryrun'):
+        commit_flag = False
+        logging.debug("commit_flag=%s" % commit_flag)
+
     vpc = kwargs.get('vpc', {})
     zone = get_zone(con, zone_name, vpc)
     if not zone:
-        zone = create_zone(con, zone_name, vpc)
+        if commit_flag:
+            zone = create_zone(con, zone_name, vpc)
 
     existing_records = comparable(skip_apex_soa_ns(zone, con.get_all_rrsets(zone['id'])))
     desired_records = comparable(skip_apex_soa_ns(zone, read_records(file_in)))
@@ -169,24 +208,25 @@ def load(con, zone_name, file_in, **kwargs):
     to_delete = existing_records.difference(desired_records)
     to_add = desired_records.difference(existing_records)
 
-    if to_add or to_delete:
-        changes = ResourceRecordSets(con, zone['id'])
-        for record in to_delete:
-            change = changes.add_change('DELETE', **record.to_change_dict())
-            print "DELETE", record.name, record.type
-            for value in record.resource_records:
-                change.add_value(value)
-        for record in to_add:
-            change = changes.add_change('CREATE', **record.to_change_dict())
-            print "CREATE", record.name, record.type
-            for value in record.resource_records:
-                change.add_value(value)
+    ''' "A request cannot contain more than 1000 ResourceRecord elements. When the 
+        value of the Action element is UPSERT, each ResourceRecord element is 
+        counted twice."
+        ~ http://docs.aws.amazon.com/Route53/latest/DeveloperGuide/DNSLimitations.html
+        
+        Change request set is committed in chunks specified by CHUNK_SIZE.
+    '''
+    CHUNK_SIZE = 250
+    logging.debug("CHUCK_SIZE=%s" % CHUNK_SIZE)
 
-        print "Applying changes..."
-        changes.commit()
-        print "Done."
+    if len(to_delete) > 0:
+        post_changes(con, zone, commit_flag, 'DELETE', to_delete, CHUNK_SIZE)
     else:
-        print "No changes."
+        logging.info("nothing to delete")
+
+    if len(to_add) > 0:
+        post_changes(con, zone, commit_flag, 'CREATE' ,to_add, CHUNK_SIZE)
+    else:
+        logging.info("noting to create")
 
 
 def dump(con, zone_name, fout, **kwargs):
@@ -216,6 +256,19 @@ def dump(con, zone_name, fout, **kwargs):
 
 
 def run(params):
+    dryrun=params.get('--dry-run')
+
+    if dryrun:
+        logging.basicConfig( 
+            level=logging.INFO,
+            format='%(asctime)s %(levelname)s [[DRY RUN]] %(message)s',
+            StreamHandler=sys.stdout)
+    else:
+        logging.basicConfig( 
+            level=logging.INFO,
+            format='%(asctime)s %(levelname)s %(message)s',
+            StreamHandler=sys.stdout)
+
     access_key, secret_key = get_aws_credentials(params)
     con = route53.connect_to_region('universal', aws_access_key_id=access_key, aws_secret_access_key=secret_key)
     zone_name = params['<zone>']
@@ -235,6 +288,6 @@ def run(params):
     if params.get('dump'):
         dump(con, zone_name, get_file(filename, 'w'), vpc=vpc)
     elif params.get('load'):
-        load(con, zone_name, get_file(filename, 'r'), vpc=vpc)
+        load(con, zone_name, get_file(filename, 'r'), vpc=vpc, dryrun=dryrun)
     else:
         return 1
