@@ -187,7 +187,7 @@ def load(con, zone_name, file_in, **kwargs):
 
         Arguments are Route53 connection, zone name, vpc info, and file to open for reading.
     '''
-
+    logging.info("Updating Zone %s" % zone_name)
 
     ''' Set dry-run flag if specified on the command line.
     '''
@@ -199,6 +199,7 @@ def load(con, zone_name, file_in, **kwargs):
     vpc = kwargs.get('vpc', {})
     zone = get_zone(con, zone_name, vpc)
     if not zone:
+        logging.info("Zone %s does not exist. Zone will be created!" % zone_name)
         if commit_flag:
             zone = create_zone(con, zone_name, vpc)
 
