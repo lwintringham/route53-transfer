@@ -18,6 +18,7 @@ Options:
   -P --private                            Private Zone
   --vpc-region=VPC_REGION                 Private Zone VPC Region (required for --private, default: $AWS_DEFAULT_REGION)
   --vpc-id=VPC_ID                         Private Zone VPC ID (required for --private)
+  -d --dry-run                            Perform a Dry-Run load (Don't commit changes)
 """
 
 from docopt import docopt
